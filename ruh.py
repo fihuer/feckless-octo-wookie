@@ -12,6 +12,7 @@ import os.path
 # Custom lib
 import wookieLib
 from wookieLib import OptionParser, OptionGroup, Option
+import expressions
 
 #### Globals ####
 
@@ -65,14 +66,22 @@ class InteractiveOrCommandLine(cmd.Cmd):
                 print item,"=",value
 
     def do_find(self, line):
-        usage = "usage: %prog find [options] expression"
+        """
+Find-like function to filter a catalog.
+Currently implemented expressions will be described underneath
+        """
+        usage = self.do_find.__doc__+"\nusage: %prog find [options] expression"
         parser = OptionParser(usage=usage)
         parser.add_option("-f", "--file", dest="catalogPath", default=None,
                           help="parse catalog located at FILE", metavar="FILE")
         parser.add_option("-c", "--compile", dest="compile",default=False,
                           help="Compile a new catalog instead of the cached one",
                           action="store_true")
-        group, expressions = defineExpressions(parser)
+        parser.add_option("--dump", dest="dump",default=False,
+                          help="Dump result in stdout (not a pager)",
+                          action="store_true")
+
+        group, expr_objs = expressions.defineExpressions(parser)
         parser.add_option_group(group)
         (options, args) = parser.parse_args(shlex.split(line))
         if options.compile:
@@ -80,13 +89,16 @@ class InteractiveOrCommandLine(cmd.Cmd):
         elif options.catalogPath:
             thread = parse_catalog(options.catalogPath)
         filterMap = {}
-        for exp in expressions:
-            value = getattr(options, exp[1:])
+        for exp in expr_objs:
+            value = getattr(options, exp.paramName)
             if value:
-                filterMap[exp[1:]] = value
+                filterMap[exp.paramName] = [value, exp]
         catalog, ftype = thread.result_queue.get()
-        filteredCatalog = filterCatalog(catalog, filterMap)
-        wookieLib.politePrint(ftype.dumps(filteredCatalog, indent=4))
+        filteredCatalog = filterCatalog(catalog, filterMap, expr_objs)
+        if options.dump:
+            print ftype.dumps(filteredCatalog, indent=4)
+        else:
+            wookieLib.politePrint(ftype.dumps(filteredCatalog, indent=4))
         
 class Puppet(object):
     def __init__(self):
@@ -138,34 +150,49 @@ def parse_puppet_config():
     config.readfp(ini_fp)
     return config
 
-def defineExpressions(parser):
-    group = OptionGroup(parser, "Expressions",
-                        "Use expression to filter out items from catalogs")
-    expressions = []
-    expressions.append(["-type",Option("-type", help="Resssource type", dest="type")])
-    expressions.append(["-title",Option("-title", help="Resssource title", dest="title")])
-    for expr in expressions:
-        group.add_option(expr[1])
-    return group, [exp[0] for exp in expressions ]
+# def defineExpressions(parser):
+#     group = OptionGroup(parser, "Expressions",
+#                         "Use expression to filter out items from catalogs")
+#     expressions = []
+#     expressions.append(["-type",Option("-type", help="Ressource type", dest="type")])
+#     expressions.append(["-title",Option("-title", help="Ressource title", dest="title")])
+#     for expr in expressions:
+#         group.add_option(expr[1])
+#     return group, [exp[0] for exp in expressions ]
 
-def filterCatalog(catalog, filterMap):
+def filterCatalog(catalog, filterMap, expr_objs):
     res = []
     for resource in catalog["data"]["resources"]:
-        if filterHit(resource, filterMap):
+        if filterHit(resource, filterMap, expr_objs):
             res.append(resource)
     return res
 
-def filterHit(item, filterMap):
+def filterHit(item, filterMap, expr_objs):
     hit = True
-    for key, value in filterMap.iteritems():
-        if key in item:
-            if item[key]==value:
-                hit = hit and True
+    touched = False
+    for key, fobj in filterMap.iteritems():
+        expr = fobj[1]
+        values = fobj[0]
+        for value in values:
+            if expr.name in item:
+                if expr.compare(item[expr.name],expr.normalize(value)):
+                    touched = True
+                    hit = hit and True
+                else:
+                    touched = True
+                    hit = hit and False
             else:
-                hit = hit and False
-        else:
-            pass
-    return hit
+                pass
+    if touched:
+        return hit
+    else:
+        return False
+
+def getExpr(key, expr_objs):
+    for expr in expr_objs:
+        if key == expr.paramName:
+            return expr
+    return None
 #### Main    ####
 
 if __name__ == '__main__':
